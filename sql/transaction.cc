@@ -156,11 +156,13 @@ static bool xa_trans_force_rollback(THD *thd)
   @param thd     Current thread
   @param flags   Transaction flags
 
-  @retval FALSE  Success
-  @retval TRUE   Failure
+  @retval 0   Success
+  @retval >0  Failure, transaction was not started
+  @retval <0  Failure, transaction was not allowed to begin.
+              Error was reported and old transaction is still active
 */
 
-bool trans_begin(THD *thd, uint flags)
+int trans_begin(THD *thd, uint flags)
 {
   int res= FALSE;
 #ifndef EMBEDDED_LIBRARY
@@ -169,7 +171,7 @@ bool trans_begin(THD *thd, uint flags)
   DBUG_ENTER("trans_begin");
 
   if (trans_check(thd))
-    DBUG_RETURN(TRUE);
+    DBUG_RETURN(-1);
 
 #ifndef EMBEDDED_LIBRARY
   if (thd->variables.session_track_transaction_info > TX_TRACK_NONE)
@@ -287,17 +289,19 @@ bool trans_begin(THD *thd, uint flags)
 
   @param thd     Current thread
 
-  @retval FALSE  Success
-  @retval TRUE   Failure
+  @retval 0   Success
+  @retval >0  Failure, transaction was rolled back
+  @retval <0  Failure, transaction was not allowed to commit.
+              Error was reported and transaction is still active
 */
 
-bool trans_commit(THD *thd)
+int trans_commit(THD *thd)
 {
   int res;
   DBUG_ENTER("trans_commit");
 
   if (trans_check(thd))
-    DBUG_RETURN(TRUE);
+    DBUG_RETURN(-1);
 
   if (WSREP_ON)
     wsrep_register_hton(thd, TRUE);
@@ -338,17 +342,19 @@ bool trans_commit(THD *thd)
 
   @param thd     Current thread
 
-  @retval FALSE  Success
-  @retval TRUE   Failure
+  @retval 0   Success
+  @retval >0  Failure, transaction was rolled back
+  @retval <0  Failure, transaction was not allowed to commit.
+              Error was reported and transaction is still active
 */
 
-bool trans_commit_implicit(THD *thd)
+int trans_commit_implicit(THD *thd)
 {
   bool res= FALSE;
   DBUG_ENTER("trans_commit_implicit");
 
   if (trans_check(thd))
-    DBUG_RETURN(TRUE);
+    DBUG_RETURN(-1);
 
   if (thd->variables.option_bits & OPTION_GTID_BEGIN)
     DBUG_PRINT("error", ("OPTION_GTID_BEGIN is set. "
@@ -392,11 +398,12 @@ bool trans_commit_implicit(THD *thd)
 
   @param thd     Current thread
 
-  @retval FALSE  Success
-  @retval TRUE   Failure
+  @retval >0  Failure, transaction was rolled back
+  @retval <0  Failure, transaction was not allowed to commit.
+              Error was reported and transaction is still active
 */
 
-bool trans_rollback(THD *thd)
+int trans_rollback(THD *thd)
 {
   int res;
   DBUG_ENTER("trans_rollback");
@@ -404,8 +411,9 @@ bool trans_rollback(THD *thd)
 #ifdef WITH_WSREP
   thd->wsrep_PA_safe= true;
 #endif /* WITH_WSREP */
+
   if (trans_check(thd))
-    DBUG_RETURN(TRUE);
+    DBUG_RETURN(-1);
 
   if (WSREP_ON)
     wsrep_register_hton(thd, TRUE);
@@ -889,14 +897,19 @@ bool trans_xa_prepare(THD *thd)
 
 /**
   Commit and terminate the a XA transaction.
+  Releases transactional mdl locks if transaction ends.
 
-  @param thd    Current thread
+  @param thd  Current thread
 
-  @retval FALSE  Success
-  @retval TRUE   Failure
+  @retval 0   Success.
+              Transactional locks are released
+  @retval >0  Failure, transaction was rolled back.
+              Transactional locks are released
+  @retval <0  Failure, transaction was not allowed to commit.
+              Error was reported and transaction is still active.
 */
 
-bool trans_xa_commit(THD *thd)
+int trans_xa_commit(THD *thd)
 {
   bool res= TRUE;
   enum xa_states xa_state= thd->transaction.xid_state.xa_state;
@@ -907,7 +920,7 @@ bool trans_xa_commit(THD *thd)
     if (thd->fix_xid_hash_pins())
     {
       my_error(ER_OUT_OF_RESOURCES, MYF(0));
-      DBUG_RETURN(TRUE);
+      DBUG_RETURN(-1);
     }
 
     XID_STATE *xs= xid_cache_search(thd, thd->lex->xid);
@@ -920,7 +933,7 @@ bool trans_xa_commit(THD *thd)
       ha_commit_or_rollback_by_xid(thd->lex->xid, !res);
       xid_cache_delete(thd, xs);
     }
-    DBUG_RETURN(res);
+    DBUG_RETURN(res ? -1 : 0);
   }
 
   if (xa_trans_rolled_back(&thd->transaction.xid_state))
@@ -972,7 +985,7 @@ bool trans_xa_commit(THD *thd)
   else
   {
     my_error(ER_XAER_RMFAIL, MYF(0), xa_state_names[xa_state]);
-    DBUG_RETURN(TRUE);
+    DBUG_RETURN(-1);
   }
 
   thd->variables.option_bits&= ~(OPTION_BEGIN | OPTION_KEEP_LOG);
@@ -984,6 +997,7 @@ bool trans_xa_commit(THD *thd)
   thd->transaction.xid_state.xa_state= XA_NOTR;
 
   trans_track_end_trx(thd);
+  thd->mdl_context.release_transactional_locks();
 
   DBUG_RETURN(res);
 }
@@ -991,14 +1005,19 @@ bool trans_xa_commit(THD *thd)
 
 /**
   Roll back and terminate a XA transaction.
+  Releases transactional mdl locks if transaction ends.
 
-  @param thd    Current thread
+  @param thd  Current thread
 
-  @retval FALSE  Success
-  @retval TRUE   Failure
+  @retval 0   Success.
+              Transactional locks are released
+  @retval >0  Failure
+              Transactional locks are released
+  @retval <0  Failure, transaction was not allowed to roll back
+              Error was reported and transaction is still active.
 */
 
-bool trans_xa_rollback(THD *thd)
+int trans_xa_rollback(THD *thd)
 {
   bool res= TRUE;
   enum xa_states xa_state= thd->transaction.xid_state.xa_state;
@@ -1009,7 +1028,7 @@ bool trans_xa_rollback(THD *thd)
     if (thd->fix_xid_hash_pins())
     {
       my_error(ER_OUT_OF_RESOURCES, MYF(0));
-      DBUG_RETURN(TRUE);
+      DBUG_RETURN(-1);
     }
 
     XID_STATE *xs= xid_cache_search(thd, thd->lex->xid);
@@ -1021,13 +1040,14 @@ bool trans_xa_rollback(THD *thd)
       ha_commit_or_rollback_by_xid(thd->lex->xid, 0);
       xid_cache_delete(thd, xs);
     }
-    DBUG_RETURN(thd->get_stmt_da()->is_error());
+    DBUG_RETURN(thd->get_stmt_da()->is_error() ? -1 : 0);
   }
 
-  if (xa_state != XA_IDLE && xa_state != XA_PREPARED && xa_state != XA_ROLLBACK_ONLY)
+  if (xa_state != XA_IDLE && xa_state != XA_PREPARED &&
+      xa_state != XA_ROLLBACK_ONLY)
   {
     my_error(ER_XAER_RMFAIL, MYF(0), xa_state_names[xa_state]);
-    DBUG_RETURN(TRUE);
+    DBUG_RETURN(-1);
   }
 
   res= xa_trans_force_rollback(thd);
@@ -1041,6 +1061,7 @@ bool trans_xa_rollback(THD *thd)
   thd->transaction.xid_state.xa_state= XA_NOTR;
 
   trans_track_end_trx(thd);
+  thd->mdl_context.release_transactional_locks();
 
   DBUG_RETURN(res);
 }

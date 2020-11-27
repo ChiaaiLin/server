@@ -50,6 +50,7 @@ int wsrep_show_bf_aborts (THD *thd, SHOW_VAR *var, char *buff,
 /* must have (&thd->LOCK_thd_data) */
 void wsrep_client_rollback(THD *thd)
 {
+  int commit_error;
   WSREP_DEBUG("client rollback due to BF abort for (%lld), query: %s",
               (longlong) thd->thread_id, thd->query());
 
@@ -57,7 +58,7 @@ void wsrep_client_rollback(THD *thd)
 
   thd->wsrep_conflict_state= ABORTING;
   mysql_mutex_unlock(&thd->LOCK_thd_data);
-  trans_rollback(thd);
+  commit_error= trans_rollback(thd);
 
   if (thd->locked_tables_mode && thd->lock)
   {
@@ -75,7 +76,8 @@ void wsrep_client_rollback(THD *thd)
   }
 
   /* Release transactional metadata locks. */
-  thd->mdl_context.release_transactional_locks();
+  if (commit_error >= 0)
+    thd->mdl_context.release_transactional_locks();
 
   /* release explicit MDL locks */
   thd->mdl_context.release_explicit_locks();

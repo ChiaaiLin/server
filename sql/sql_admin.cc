@@ -40,7 +40,8 @@ static bool admin_recreate_table(THD *thd, TABLE_LIST *table_list)
   DBUG_ENTER("admin_recreate_table");
 
   trans_rollback_stmt(thd);
-  trans_rollback(thd);
+  if (trans_rollback(thd) < 0)
+    DBUG_RETURN(1);
   close_thread_tables(thd);
   thd->mdl_context.release_transactional_locks();
 
@@ -441,7 +442,7 @@ static bool mysql_admin_table(THD* thd, TABLE_LIST* tables,
   Item *item;
   Protocol *protocol= thd->protocol;
   LEX *lex= thd->lex;
-  int result_code;
+  int result_code, commit_error;
   int compl_result_code;
   bool need_repair_or_alter= 0;
   wait_for_commit* suspended_wfc;
@@ -540,7 +541,11 @@ static bool mysql_admin_table(THD* thd, TABLE_LIST* tables,
         break;
 
       trans_rollback_stmt(thd);
-      trans_rollback(thd);
+      if (trans_rollback(thd) < 0)
+      {
+        result_code= HA_ADMIN_FAILED;
+        goto send_result;
+      }
       close_thread_tables(thd);
       table->table= NULL;
       thd->mdl_context.release_transactional_locks();
@@ -595,8 +600,10 @@ static bool mysql_admin_table(THD* thd, TABLE_LIST* tables,
       switch ((*prepare_func)(thd, table, check_opt)) {
       case  1:           // error, message written to net
         trans_rollback_stmt(thd);
-        trans_rollback(thd);
+        commit_error= trans_rollback(thd);
         close_thread_tables(thd);
+        if (commit_error < 0)
+          goto err;
         thd->mdl_context.release_transactional_locks();
         DBUG_PRINT("admin", ("simple error, admin next table"));
         continue;
@@ -668,9 +675,11 @@ static bool mysql_admin_table(THD* thd, TABLE_LIST* tables,
                           table_name);
       protocol->store(buff, length, system_charset_info);
       trans_commit_stmt(thd);
-      trans_commit(thd);
+      commit_error= trans_commit(thd);
+      DBUG_ASSERT(commit_error >= 0);
       close_thread_tables(thd);
-      thd->mdl_context.release_transactional_locks();
+      if (commit_error >= 0)
+        thd->mdl_context.release_transactional_locks();
       lex->reset_query_tables_list(FALSE);
       /*
         Restore Query_tables_list::sql_command value to make statement
@@ -799,7 +808,8 @@ static bool mysql_admin_table(THD* thd, TABLE_LIST* tables,
         InnoDB/XtraDB will allow read/write and MyISAM read/insert.
       */
       trans_commit_stmt(thd);
-      trans_commit(thd);
+      commit_error= trans_commit(thd);
+      DBUG_ASSERT(commit_error >= 0);
       thd->open_options|= extra_open_options;
       close_thread_tables(thd);
       table->table= NULL;
@@ -1033,7 +1043,8 @@ send_result_message:
       result_code= admin_recreate_table(thd, table);
       reenable_binlog(thd);
       trans_commit_stmt(thd);
-      trans_commit(thd);
+      commit_error= trans_commit(thd);
+      DBUG_ASSERT(commit_error >= 0);
       close_thread_tables(thd);
       thd->mdl_context.release_transactional_locks();
       /* Clear references to TABLE and MDL_ticket after releasing them. */
@@ -1188,7 +1199,12 @@ send_result_message:
         goto err;
     }
     close_thread_tables(thd);
-    thd->mdl_context.release_transactional_locks();
+    if (!(thd->server_status &
+          (SERVER_STATUS_IN_TRANS | SERVER_STATUS_IN_TRANS_READONLY)))
+    {
+      /* No actice transactions, release mdl locks */
+      thd->mdl_context.release_transactional_locks();
+    }
 
     /*
       If it is CHECK TABLE v1, v2, v3, and v1, v2, v3 are views, we will run
@@ -1226,7 +1242,9 @@ err:
     table->table= 0;
   }
   close_thread_tables(thd);			// Shouldn't be needed
-  thd->mdl_context.release_transactional_locks();
+  if (!(thd->server_status &
+        (SERVER_STATUS_IN_TRANS | SERVER_STATUS_IN_TRANS_READONLY)))
+    thd->mdl_context.release_transactional_locks();
   thd->resume_subsequent_commits(suspended_wfc);
   DBUG_RETURN(TRUE);
 }

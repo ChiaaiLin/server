@@ -7150,6 +7150,7 @@ error:
   if (thd->transaction_rollback_request)
   {
     trans_rollback_implicit(thd);
+    /* Rollback always ends transaction for slave threads */
     thd->mdl_context.release_transactional_locks();
   }
   else if (! thd->in_multi_stmt_transaction_mode())
@@ -8495,7 +8496,7 @@ void Xid_log_event::print(FILE* file, PRINT_EVENT_INFO* print_event_info)
 #if defined(HAVE_REPLICATION) && !defined(MYSQL_CLIENT)
 int Xid_log_event::do_apply_event(rpl_group_info *rgi)
 {
-  bool res;
+  int res;
   int err;
   rpl_gtid gtid;
   uint64 sub_id= 0;
@@ -8553,8 +8554,9 @@ int Xid_log_event::do_apply_event(rpl_group_info *rgi)
   general_log_print(thd, COM_QUERY,
                     "COMMIT /* implicit, from Xid_log_event */");
   thd->variables.option_bits&= ~OPTION_GTID_BEGIN;
-  res= trans_commit(thd); /* Automatically rolls back on error. */
-  thd->mdl_context.release_transactional_locks();
+  res= trans_commit(thd);
+  if (res >= 0) /* commit or rollback done */
+    thd->mdl_context.release_transactional_locks();
 
 #ifdef WITH_WSREP
   if (WSREP(thd)) mysql_mutex_lock(&thd->LOCK_thd_data);
@@ -8572,7 +8574,7 @@ int Xid_log_event::do_apply_event(rpl_group_info *rgi)
   */
   status_var_increment(thd->status_var.com_stat[SQLCOM_COMMIT]);
 
-  return res;
+  return MY_TEST(res);
 }
 
 Log_event::enum_skip_reason

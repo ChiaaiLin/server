@@ -2018,6 +2018,7 @@ void rpl_group_info::slave_close_thread_tables(THD *thd)
   if (thd->transaction_rollback_request)
   {
     trans_rollback_implicit(thd);
+    /* Rollback always ends transaction for slave threads */
     thd->mdl_context.release_transactional_locks();
   }
   else if (! thd->in_multi_stmt_transaction_mode())

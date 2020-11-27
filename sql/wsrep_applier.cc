@@ -85,6 +85,7 @@ static wsrep_cb_status_t wsrep_apply_events(THD*        thd,
   char *buf= (char *)events_buf;
   int rcode= 0;
   int event= 1;
+  int commit_error;
   Log_event_type typ;
 
   DBUG_ENTER("wsrep_apply_events");
@@ -184,10 +185,11 @@ static wsrep_cb_status_t wsrep_apply_events(THD*        thd,
     if (thd->wsrep_conflict_state == MUST_ABORT) {
       WSREP_WARN("RBR event apply failed, rolling back: %lld",
                  (long long) wsrep_thd_trx_seqno(thd));
-      trans_rollback(thd);
+      commit_error= trans_rollback(thd);
       thd->locked_tables_list.unlock_locked_tables(thd);
       /* Release transactional metadata locks. */
-      thd->mdl_context.release_transactional_locks();
+      if (commit_error >= 0)
+        thd->mdl_context.release_transactional_locks();
       thd->wsrep_conflict_state= NO_CONFLICT;
       DBUG_RETURN(WSREP_CB_FAILURE);
     }

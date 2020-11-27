@@ -2811,6 +2811,7 @@ static bool lock_tables_open_and_lock_tables(THD *thd, TABLE_LIST *tables)
   MDL_deadlock_and_lock_abort_error_handler deadlock_handler;
   MDL_savepoint mdl_savepoint= thd->mdl_context.mdl_savepoint();
   uint counter;
+  int commit_error;
   TABLE_LIST *table;
 
   thd->in_lock_tables= 1;
@@ -2930,11 +2931,12 @@ err:
     can free its locks if LOCK TABLES locked some tables before finding
     that it can't lock a table in its list
   */
-  trans_rollback(thd);
+  commit_error= trans_rollback(thd);
   /* Close tables and release metadata locks. */
   close_thread_tables(thd);
   DBUG_ASSERT(!thd->locked_tables_mode);
-  thd->mdl_context.release_transactional_locks();
+  if (commit_error >= 0)
+    thd->mdl_context.release_transactional_locks();
   return TRUE;
 }
 
@@ -3404,9 +3406,10 @@ mysql_execute_command(THD *thd)
     if (!(thd->variables.option_bits & OPTION_GTID_BEGIN))
     {
       /* Commit the normal transaction if one is active. */
-      bool commit_failed= trans_commit_implicit(thd);
+      int commit_failed= trans_commit_implicit(thd);
       /* Release metadata locks acquired in this transaction. */
-      thd->mdl_context.release_transactional_locks();
+      if (commit_failed >= 0)
+        thd->mdl_context.release_transactional_locks();
       if (commit_failed)
       {
         WSREP_DEBUG("implicit commit failed, MDL released: %lld",
@@ -4645,7 +4648,8 @@ mysql_execute_command(THD *thd)
     {
       res= trans_commit_implicit(thd);
       thd->locked_tables_list.unlock_locked_tables(thd);
-      thd->mdl_context.release_transactional_locks();
+      if (res >= 0)
+        thd->mdl_context.release_transactional_locks();
       thd->variables.option_bits&= ~(OPTION_TABLE_LOCK);
     }
     if (thd->global_read_lock.is_acquired())
@@ -4659,7 +4663,8 @@ mysql_execute_command(THD *thd)
     res= trans_commit_implicit(thd);
     thd->locked_tables_list.unlock_locked_tables(thd);
     /* Release transactional metadata locks. */
-    thd->mdl_context.release_transactional_locks();
+    if (res >= 0)
+      thd->mdl_context.release_transactional_locks();
     if (res)
       goto error;
 
@@ -5310,16 +5315,20 @@ mysql_execute_command(THD *thd)
     break;
 
   case SQLCOM_BEGIN:
+  {
+    int commit_error;
     DBUG_PRINT("info", ("Executing SQLCOM_BEGIN  thd: %p", thd));
-    if (trans_begin(thd, lex->start_transaction_opt))
+    if ((commit_error= trans_begin(thd, lex->start_transaction_opt)))
     {
-      thd->mdl_context.release_transactional_locks();
+      if (commit_error >= 0)
+        thd->mdl_context.release_transactional_locks();
       WSREP_DEBUG("BEGIN failed, MDL released: %lld",
                   (longlong) thd->thread_id);
       goto error;
     }
     my_ok(thd);
     break;
+  }
   case SQLCOM_COMMIT:
   {
     DBUG_ASSERT(thd->lock == NULL ||
@@ -5330,8 +5339,9 @@ mysql_execute_command(THD *thd)
     bool tx_release= (lex->tx_release == TVL_YES ||
                       (thd->variables.completion_type == 2 &&
                        lex->tx_release != TVL_NO));
-    bool commit_failed= trans_commit(thd);
-    thd->mdl_context.release_transactional_locks();
+    int commit_failed= trans_commit(thd);
+    if (commit_failed >= 0)
+      thd->mdl_context.release_transactional_locks();
     if (commit_failed)
     {
       WSREP_DEBUG("COMMIT failed, MDL released: %lld",
@@ -5381,8 +5391,9 @@ mysql_execute_command(THD *thd)
     bool tx_release= (lex->tx_release == TVL_YES ||
                       (thd->variables.completion_type == 2 &&
                        lex->tx_release != TVL_NO));
-    bool rollback_failed= trans_rollback(thd);
-    thd->mdl_context.release_transactional_locks();
+    int rollback_failed= trans_rollback(thd);
+    if (rollback_failed >= 0)
+      thd->mdl_context.release_transactional_locks();
 
     if (rollback_failed)
     {
@@ -5858,8 +5869,7 @@ mysql_execute_command(THD *thd)
     break;
   case SQLCOM_XA_COMMIT:
   {
-    bool commit_failed= trans_xa_commit(thd);
-    thd->mdl_context.release_transactional_locks();
+    int commit_failed= trans_xa_commit(thd);
     if (commit_failed)
     {
       WSREP_DEBUG("XA commit failed, MDL released: %lld",
@@ -5876,8 +5886,7 @@ mysql_execute_command(THD *thd)
   }
   case SQLCOM_XA_ROLLBACK:
   {
-    bool rollback_failed= trans_xa_rollback(thd);
-    thd->mdl_context.release_transactional_locks();
+    int rollback_failed= trans_xa_rollback(thd);
     if (rollback_failed)
     {
       WSREP_DEBUG("XA rollback failed, MDL released: %lld",
@@ -6103,12 +6112,16 @@ finish:
     DBUG_ASSERT(! thd->in_sub_stmt);
     if (!(thd->variables.option_bits & OPTION_GTID_BEGIN))
     {
+      int commit_failed;
       /* If commit fails, we should be able to reset the OK status. */
       thd->get_stmt_da()->set_overwrite_status(true);
       /* Commit the normal transaction if one is active. */
-      trans_commit_implicit(thd);
+      commit_failed= trans_commit_implicit(thd);
       thd->get_stmt_da()->set_overwrite_status(false);
-      thd->mdl_context.release_transactional_locks();
+      if (commit_failed >= 0)
+        thd->mdl_context.release_transactional_locks();
+      else
+        res= 1;
     }
   }
   else if (! thd->in_sub_stmt && ! thd->in_multi_stmt_transaction_mode())

@@ -4580,7 +4580,8 @@ bool select_create::send_eof()
         WSREP_ERROR("Appending table key for CTAS failed: %s, %d",
                     (wsrep_thd_query(thd)) ?
                     wsrep_thd_query(thd) : "void", rcode);
-        return true;
+        abort_result_set();
+        DBUG_RETURN(true);
       }
       /* If commit fails, we should be able to reset the OK status. */
       thd->get_stmt_da()->set_overwrite_status(TRUE);
@@ -4588,7 +4589,13 @@ bool select_create::send_eof()
 #endif /* WITH_WSREP */
     trans_commit_stmt(thd);
     if (!(thd->variables.option_bits & OPTION_GTID_BEGIN))
-      trans_commit_implicit(thd);
+    {
+      if (trans_commit_implicit(thd) < 0)
+      {
+        abort_result_set();
+        DBUG_RETURN(true);
+      }
+    }
 #ifdef WITH_WSREP
     if (WSREP_ON)
     {

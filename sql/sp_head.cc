@@ -2166,7 +2166,11 @@ sp_head::execute_procedure(THD *thd, List<Item> *args)
         thd->mdl_context.release_transactional_locks();
       }
       else if (! thd->in_multi_stmt_transaction_mode())
-        thd->mdl_context.release_transactional_locks();
+      {
+        if (!(thd->server_status &
+              (SERVER_STATUS_IN_TRANS | SERVER_STATUS_IN_TRANS_READONLY)))
+          thd->mdl_context.release_transactional_locks();
+      }
       else
         thd->mdl_context.release_statement_locks();
     }
@@ -3122,7 +3126,11 @@ sp_lex_keeper::reset_lex_and_exec_core(THD *thd, uint *nextp,
         thd->mdl_context.release_transactional_locks();
       }
       else if (! thd->in_multi_stmt_transaction_mode())
-        thd->mdl_context.release_transactional_locks();
+      {
+        if (!(thd->server_status &
+              (SERVER_STATUS_IN_TRANS | SERVER_STATUS_IN_TRANS_READONLY)))
+          thd->mdl_context.release_transactional_locks();
+      }
       else
         thd->mdl_context.release_statement_locks();
     }
